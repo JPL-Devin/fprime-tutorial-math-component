@@ -1,0 +1,122 @@
+# Runs on this repository's pushes/PRs and on dispatch from the nasa/fprime external-CI orchestrator,
+# which overlays an exact F´ commit under lib/fprime. Dispatched runs build untrusted code: no secrets, no cache writes.
+name: CI
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.dispatch_id != '' && format('ext-ci {0} ({1}@{2})', inputs.dispatch_id, inputs.fprime_repository, inputs.fprime_ref) || '' }}
+
+on:
+  push:
+    branches: [ devel ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      fprime_repository:
+        description: "F´ repository to overlay under lib/fprime (<owner>/<repo>); a fork for fork PRs"
+        type: string
+        default: nasa/fprime
+      fprime_ref:
+        description: "F´ ref to overlay; the orchestrator passes an exact commit SHA"
+        type: string
+        default: devel
+      fprime_pr_number:
+        description: "nasa/fprime PR number being tested (empty for branch runs); used to pick nasa/fprime-gds@pr-<N>"
+        type: string
+        default: ""
+      dispatch_id:
+        description: "Correlation id set by the orchestrator (informational)"
+        type: string
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.dispatch_id || github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Build"
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "Setup output-cleaner"
+        uses: nasa/fprime-actions/output-cleaner@devel
+      - name: "Checkout project"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: "Overlay requested F´ revision"
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.fprime_repository }}
+          ref: ${{ inputs.fprime_ref }}
+          path: lib/fprime
+          submodules: true
+          fetch-depth: 0
+          filter: blob:none
+      - name: "Setup F´ toolchain"
+        uses: nasa/fprime-actions/setup@devel
+        with:
+          location: lib/fprime
+          ccache: ${{ github.event_name != 'workflow_dispatch' }}
+      - name: "Generate build cache"
+        working-directory: MathProject/MathDeployment
+        run: fprime-util generate 2>&1 | output-cleaner
+        shell: bash
+      - name: "Build"
+        working-directory: MathProject/MathDeployment
+        run: fprime-util build -j8 2>&1 | output-cleaner
+        shell: bash
+      - name: "Upload build artifacts"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: build-artifacts
+          if-no-files-found: ignore
+          retention-days: 1
+  unit-tests:
+    name: "Unit Tests"
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "Setup output-cleaner"
+        uses: nasa/fprime-actions/output-cleaner@devel
+      - name: "Checkout project"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: "Overlay requested F´ revision"
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.fprime_repository }}
+          ref: ${{ inputs.fprime_ref }}
+          path: lib/fprime
+          submodules: true
+          fetch-depth: 0
+          filter: blob:none
+      - name: "Setup F´ toolchain"
+        uses: nasa/fprime-actions/setup@devel
+        with:
+          location: lib/fprime
+          ccache: ${{ github.event_name != 'workflow_dispatch' }}
+      - name: "Generate UT build cache"
+        working-directory: MathProject/MathDeployment
+        run: fprime-util generate --ut 2>&1 | output-cleaner
+        shell: bash
+      - name: "Build UTs"
+        working-directory: MathProject/MathDeployment
+        run: fprime-util build --ut -j8 2>&1 | output-cleaner
+        shell: bash
+      - name: "Run Unit Tests"
+        working-directory: MathProject/MathDeployment
+        run: fprime-util check -j8 --pass-through --output-on-failure
+        shell: bash
+      - name: "Archive test logs"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-logs
+          path: MathProject/MathDeployment/build-*/Testing/Temporary/*.log
+          if-no-files-found: ignore
+          retention-days: 5
